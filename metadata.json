@@ -1,0 +1,5 @@
+{
+  "name": "OmniDiagram",
+  "description": "An AI-powered diagram generator that converts natural language descriptions into any type of diagram using Mermaid.js.",
+  "requestFramePermissions": []
+}
