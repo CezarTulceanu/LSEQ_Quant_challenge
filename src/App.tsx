@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { GoogleGenAI } from '@google/genai';
-import { Sparkles, Code, LayoutTemplate, Download, Loader2, Key } from 'lucide-react';
+import { Sparkles, Code, LayoutTemplate, Download, Loader2, Key, X, Info, FileImage, FileText } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
+import { jsPDF } from 'jspdf';
 import Mermaid from './components/Mermaid';
 
 declare global {
@@ -19,6 +21,11 @@ export default function App() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [showCode, setShowCode] = useState(false);
   const [error, setError] = useState('');
+  
+  // Node explanation state
+  const [selectedNode, setSelectedNode] = useState<string | null>(null);
+  const [nodeExplanation, setNodeExplanation] = useState<string | null>(null);
+  const [isExplaining, setIsExplaining] = useState(false);
 
   const getSystemInstruction = (level: number) => {
     const baseInstruction = `You are an expert at creating Mermaid.js diagrams. Convert the user's description into valid Mermaid.js syntax. Return ONLY the raw Mermaid code. Do not use markdown backticks (\`\`\`mermaid) or any explanatory text.
@@ -49,7 +56,8 @@ export default function App() {
 ### Complexity Level 3 (Advanced):
 1. **Scope**: Create a detailed architectural diagram. Include standard infrastructure components like databases, APIs, and clear logical boundaries.
 2. **Styling**: Use subgraphs to group related components logically.
-3. **Professional Routing**: You MUST start the diagram with \`%%{init: {"flowchart": {"curve": "linear"}}}%%\` to ensure straight, professional lines instead of wobbly curves.`;
+3. **Balanced Layout**: Organize nodes to prevent lines from bunching up or crossing excessively. Keep the layout clean and readable.
+4. **Professional Routing**: You MUST start the diagram with \`%%{init: {"flowchart": {"curve": "linear", "nodeSpacing": 80, "rankSpacing": 80}}}%%\` to ensure straight, professional lines with plenty of breathing room.`;
       case 4:
       default:
         return `${baseInstruction}
@@ -62,7 +70,8 @@ export default function App() {
 5. **Messaging**: Incorporate Message Brokers (Kafka/RabbitMQ) for asynchronous decoupling.
 6. **Observability**: Include dedicated nodes for Logging and Monitoring.
 7. **Vague Input Handling**: Assume the user is building a modern, cloud-native microservices environment. Fill in any missing "best practice" components.
-8. **Professional Routing**: You MUST start the diagram with \`%%{init: {"flowchart": {"curve": "linear"}}}%%\` to ensure straight, professional lines instead of wobbly curves.`;
+8. **Balanced Layout**: Organize nodes meticulously to prevent lines from bunching up or crossing. Use subgraphs to compartmentalize complexity and keep the diagram highly readable.
+9. **Professional Routing**: You MUST start the diagram with \`%%{init: {"flowchart": {"curve": "linear", "nodeSpacing": 100, "rankSpacing": 100}}}%%\` to ensure straight, professional lines with ample spacing.`;
     }
   };
 
@@ -117,10 +126,66 @@ export default function App() {
     }
   };
 
-  const handleDownload = () => {
+  const handleNodeClick = async (nodeText: string) => {
+    // If we click the same node, just toggle it off
+    if (selectedNode === nodeText) {
+      setSelectedNode(null);
+      setNodeExplanation(null);
+      return;
+    }
+
+    setSelectedNode(nodeText);
+    setNodeExplanation(null);
+    setIsExplaining(true);
+
+    try {
+      const hasKey = await window.aistudio.hasSelectedApiKey();
+      if (!hasKey) {
+        await window.aistudio.openSelectKey();
+      }
+
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || process.env.GEMINI_API_KEY });
+
+      const prompt = `You are a Senior Systems Architect. The user clicked on the node "${nodeText}" in the following Mermaid diagram. 
+      
+Provide a quick, clear, and insightful explanation of what this component does in the context of this specific architecture. Keep it concise (2-3 sentences max). Focus on its role and value.
+
+CRITICAL: Do NOT use any Markdown formatting in your response. Do not use asterisks (**) for bolding or italics. Return ONLY plain text.
+
+Diagram Code:
+\`\`\`mermaid
+${mermaidCode}
+\`\`\``;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.1-pro-preview',
+        contents: prompt,
+        config: {
+          temperature: 0.2,
+        }
+      });
+      
+      let explanationText = response.text || 'No explanation generated.';
+      // Strip out any markdown bold/italic asterisks just in case the model includes them
+      explanationText = explanationText.replace(/\*\*/g, '').replace(/\*/g, '');
+      
+      setNodeExplanation(explanationText);
+    } catch (err: any) {
+      console.error('Explanation error:', err);
+      if (err.message && err.message.includes("Requested entity was not found.")) {
+        setNodeExplanation("API Key not found or invalid. Please select your API key again.");
+        await window.aistudio.openSelectKey();
+      } else {
+        setNodeExplanation('Failed to generate explanation. ' + (err.message || ''));
+      }
+    } finally {
+      setIsExplaining(false);
+    }
+  };
+
+  const handleDownloadSVG = () => {
     if (!mermaidCode) return;
     
-    // Find the SVG element rendered by Mermaid
     const svgElement = document.querySelector('.mermaid svg');
     if (!svgElement) return;
     
@@ -135,6 +200,73 @@ export default function App() {
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
+  };
+
+  const getCanvasFromSVG = (): Promise<HTMLCanvasElement> => {
+    return new Promise((resolve, reject) => {
+      const svgElement = document.querySelector('.mermaid svg') as SVGSVGElement;
+      if (!svgElement) return reject(new Error('SVG not found'));
+      
+      const svgData = new XMLSerializer().serializeToString(svgElement);
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return reject(new Error('Canvas context not found'));
+
+      const img = new Image();
+      img.onload = () => {
+        // Use bounding box or viewBox for dimensions
+        const rect = svgElement.getBoundingClientRect();
+        canvas.width = rect.width * 2; // High resolution
+        canvas.height = rect.height * 2;
+        
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.scale(2, 2);
+        ctx.drawImage(img, 0, 0, rect.width, rect.height);
+        resolve(canvas);
+      };
+      img.onerror = reject;
+      
+      // Encode SVG to base64 properly handling unicode
+      const encodedData = btoa(unescape(encodeURIComponent(svgData)));
+      img.src = `data:image/svg+xml;base64,${encodedData}`;
+    });
+  };
+
+  const handleDownloadPNG = async () => {
+    if (!mermaidCode) return;
+    try {
+      const canvas = await getCanvasFromSVG();
+      const pngUrl = canvas.toDataURL('image/png');
+      const link = document.createElement('a');
+      link.href = pngUrl;
+      link.download = 'diagram.png';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } catch (err) {
+      console.error('Failed to download PNG:', err);
+    }
+  };
+
+  const handleDownloadPDF = async () => {
+    if (!mermaidCode) return;
+    try {
+      const canvas = await getCanvasFromSVG();
+      const imgData = canvas.toDataURL('image/png');
+      
+      const orientation = canvas.width > canvas.height ? 'l' : 'p';
+      const pdf = new jsPDF({
+        orientation,
+        unit: 'px',
+        format: [canvas.width, canvas.height]
+      });
+      
+      pdf.addImage(imgData, 'PNG', 0, 0, canvas.width, canvas.height);
+      pdf.save('diagram.pdf');
+    } catch (err) {
+      console.error('Failed to download PDF:', err);
+    }
   };
 
   return (
@@ -259,13 +391,32 @@ export default function App() {
           {/* Toolbar */}
           <div className="absolute top-4 right-4 z-10 flex gap-2">
             {mermaidCode && (
-              <button
-                onClick={handleDownload}
-                className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 shadow-sm rounded-lg text-sm font-medium text-slate-700 hover:bg-slate-50 hover:text-slate-900 transition-colors"
-              >
-                <Download className="w-4 h-4" />
-                Export SVG
-              </button>
+              <>
+                <button
+                  onClick={handleDownloadSVG}
+                  className="flex items-center gap-2 px-3 py-2 bg-white border border-slate-200 shadow-sm rounded-lg text-sm font-medium text-slate-700 hover:bg-slate-50 hover:text-slate-900 transition-colors"
+                  title="Export as SVG"
+                >
+                  <Code className="w-4 h-4" />
+                  <span className="hidden sm:inline">SVG</span>
+                </button>
+                <button
+                  onClick={handleDownloadPNG}
+                  className="flex items-center gap-2 px-3 py-2 bg-white border border-slate-200 shadow-sm rounded-lg text-sm font-medium text-slate-700 hover:bg-slate-50 hover:text-slate-900 transition-colors"
+                  title="Export as PNG"
+                >
+                  <FileImage className="w-4 h-4" />
+                  <span className="hidden sm:inline">PNG</span>
+                </button>
+                <button
+                  onClick={handleDownloadPDF}
+                  className="flex items-center gap-2 px-3 py-2 bg-white border border-slate-200 shadow-sm rounded-lg text-sm font-medium text-slate-700 hover:bg-slate-50 hover:text-slate-900 transition-colors"
+                  title="Export as PDF"
+                >
+                  <FileText className="w-4 h-4" />
+                  <span className="hidden sm:inline">PDF</span>
+                </button>
+              </>
             )}
           </div>
 
@@ -288,10 +439,61 @@ export default function App() {
               </div>
             ) : (
               <div className="bg-white p-8 rounded-2xl shadow-sm border border-slate-200 min-w-full min-h-full flex items-center justify-center overflow-auto">
-                <Mermaid chart={mermaidCode} />
+                <Mermaid chart={mermaidCode} onNodeClick={handleNodeClick} />
               </div>
             )}
           </div>
+
+          {/* Node Explanation Panel */}
+          <AnimatePresence>
+            {selectedNode && (
+              <motion.div
+                initial={{ opacity: 0, y: 20, x: "-50%", scale: 0.95 }}
+                animate={{ opacity: 1, y: 0, x: "-50%", scale: 1 }}
+                exit={{ opacity: 0, y: 20, x: "-50%", scale: 0.95 }}
+                transition={{ duration: 0.2, ease: "easeOut" }}
+                className="absolute bottom-6 left-1/2 w-[calc(100%-3rem)] max-w-lg bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden z-20"
+              >
+                <div className="p-4 bg-indigo-50/50 border-b border-slate-100 flex items-start justify-between">
+                  <div className="flex items-center gap-2 text-indigo-700">
+                    <Info className="w-5 h-5" />
+                    <h3 className="font-semibold text-sm">Node Insights</h3>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setSelectedNode(null);
+                      setNodeExplanation(null);
+                    }}
+                    className="p-1 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+                <div className="p-5">
+                  <div className="mb-3">
+                    <span className="text-xs font-medium text-slate-500 uppercase tracking-wider">Selected Component</span>
+                    <div className="text-sm font-semibold text-slate-900 mt-1">{selectedNode}</div>
+                  </div>
+                  <div className="text-sm text-slate-600 leading-relaxed">
+                    {isExplaining ? (
+                      <div className="flex items-center gap-2 text-indigo-600 animate-pulse">
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>Analyzing architecture...</span>
+                      </div>
+                    ) : (
+                      <motion.div
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        transition={{ duration: 0.3 }}
+                      >
+                        {nodeExplanation}
+                      </motion.div>
+                    )}
+                  </div>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
       </main>
     </div>
